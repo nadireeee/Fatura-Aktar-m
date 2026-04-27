@@ -1,0 +1,24 @@
+.vs/
+.vscode/
+
+# Python venv
+.venv/
+__pycache__/
+*.py[cod]
+
+# .NET / Visual Studio
+bin/
+obj/
+*.user
+*.suo
+
+# Build outputs (project-specific)
+_build_check_out/
+_build_chk/
+_build_out/
+_build_out2/
+_build_rc/
+
+# OS
+Thumbs.db
+Desktop.ini

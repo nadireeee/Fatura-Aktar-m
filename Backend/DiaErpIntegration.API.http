@@ -1,0 +1,6 @@
+@DiaErpIntegration.API_HostAddress = http://localhost:5189
+
+GET {{DiaErpIntegration.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
