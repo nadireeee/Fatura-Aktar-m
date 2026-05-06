@@ -39,6 +39,12 @@ export interface ISourceDepotDto {
   depoadi: string;
 }
 
+export interface ISourceCurrencyDto {
+  key: number;
+  kodu: string;
+  adi: string;
+}
+
 export interface IDefaultSourceContextDto {
   defaultSourceFirmaKodu: number;
   defaultSourceDonemKodu: number;

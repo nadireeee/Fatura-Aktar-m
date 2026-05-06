@@ -261,12 +261,43 @@ namespace DiaErpIntegration.API.Controllers
             }
         }
 
-        [HttpGet("branches")]
-        public async Task<IActionResult> GetBranches([FromQuery] int firmaKodu)
+        [HttpGet("currencies")]
+        public async Task<IActionResult> GetCurrencies([FromQuery] int firmaKodu, [FromQuery] int donemKodu)
         {
             try
             {
-                var probeDonem = _opt.DefaultSourceDonemKodu > 0 ? _opt.DefaultSourceDonemKodu : 1;
+                if (firmaKodu <= 0 || donemKodu <= 0)
+                    return BadRequest(new { message = "firmaKodu ve donemKodu zorunludur." });
+
+                var rows = await _diaClient.GetCurrenciesAsync(firmaKodu, donemKodu);
+                var mapped = rows
+                    .Where(x => x.Key > 0)
+                    .Select(x => new CurrencyDto
+                    {
+                        Key = x.Key,
+                        // bazı tenantlarda kodu boş, adi "TL/USD/EUR" gelir
+                        Kodu = string.IsNullOrWhiteSpace(x.Kodu) ? (x.Adi ?? string.Empty).Trim() : (x.Kodu ?? string.Empty).Trim(),
+                        Adi = (x.Adi ?? string.Empty).Trim(),
+                    })
+                    .OrderBy(x => x.Kodu)
+                    .ToList();
+
+                return Ok(mapped);
+            }
+            catch
+            {
+                return StatusCode(502, new { message = "Lookup başarısız: döviz listesi alınamadı." });
+            }
+        }
+
+        [HttpGet("branches")]
+        public async Task<IActionResult> GetBranches([FromQuery] int firmaKodu, [FromQuery] int? donemKodu)
+        {
+            try
+            {
+                var probeDonem = (donemKodu.HasValue && donemKodu.Value > 0)
+                    ? donemKodu.Value
+                    : (_opt.DefaultSourceDonemKodu > 0 ? _opt.DefaultSourceDonemKodu : 1);
                 var bKey = $"{firmaKodu}|{probeDonem}";
                 if (_branchCache.TryGetValue(bKey, out var bhit) && CacheFresh(bhit.at, 10) && bhit.branches.Count > 0)
                 {
@@ -323,8 +354,221 @@ namespace DiaErpIntegration.API.Controllers
             }
         }
 
+        [HttpGet("branches-all")]
+        public async Task<IActionResult> GetBranchesAll([FromQuery] int firmaKodu)
+        {
+            try
+            {
+                if (firmaKodu <= 0) return BadRequest(new { message = "firmaKodu zorunludur." });
+                var bKey = $"{firmaKodu}|ALL";
+                if (_branchCache.TryGetValue(bKey, out var bhit) && CacheFresh(bhit.at, 60) && bhit.branches.Count > 0)
+                {
+                    var cached = bhit.branches
+                        .Select(s => new BranchDto { Key = s.Key, SubeAdi = s.SubeAdi })
+                        .OrderBy(s => s.SubeAdi)
+                        .ToList();
+                    return Ok(cached);
+                }
+
+                // Tüm dönemlerden şube/depo birleşimi
+                var ps = await _diaClient.GetPeriodsByFirmaAsync(firmaKodu);
+                var donems = ps.Select(p => p.DonemKodu).Where(d => d > 0).Distinct().ToList();
+                if (donems.Count == 0)
+                    donems = new List<int> { _opt.DefaultSourceDonemKodu > 0 ? _opt.DefaultSourceDonemKodu : 1 };
+
+                var merged = new Dictionary<long, DiaAuthorizedBranchItem>();
+                foreach (var d in donems)
+                {
+                    var branches = await _diaClient.GetSubelerDepolarForFirmaAsync(firmaKodu, d);
+                    foreach (var b in branches.Where(x => x.Key > 0 && !string.IsNullOrWhiteSpace(x.SubeAdi)))
+                    {
+                        if (!merged.ContainsKey(b.Key))
+                            merged[b.Key] = new DiaAuthorizedBranchItem { Key = b.Key, SubeAdi = b.SubeAdi, Depolar = new List<DiaAuthorizedDepotItem>() };
+                    }
+                }
+
+                var list = merged.Values
+                    .OrderBy(x => x.SubeAdi, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                _branchCache[bKey] = (DateTimeOffset.UtcNow, list);
+                var dto = list.Select(s => new BranchDto { Key = s.Key, SubeAdi = s.SubeAdi }).ToList();
+                return Ok(dto);
+            }
+            catch
+            {
+                return StatusCode(502, new { message = "Lookup başarısız: tüm şubeler alınamadı.", firmaKodu });
+            }
+        }
+
+        [HttpGet("depots-all")]
+        public async Task<IActionResult> GetDepotsAll([FromQuery] int firmaKodu)
+        {
+            try
+            {
+                if (firmaKodu <= 0) return BadRequest(new { message = "firmaKodu zorunludur." });
+                var cacheKey = $"{firmaKodu}|ALL_DEPOTS";
+                if (_branchCache.TryGetValue(cacheKey, out var hit) && CacheFresh(hit.at, 60) && hit.branches.Count > 0)
+                {
+                    // Depoları branch cache içine gömülü tutuyoruz.
+                    var depots = hit.branches
+                        .SelectMany(b => b.Depolar ?? new List<DiaAuthorizedDepotItem>())
+                        .Where(d => d.Key > 0 && !string.IsNullOrWhiteSpace(d.DepoAdi))
+                        .GroupBy(d => d.Key)
+                        .Select(g => g.First())
+                        .OrderBy(d => d.DepoAdi, StringComparer.OrdinalIgnoreCase)
+                        .Select(d => new DepotDto { Key = d.Key, DepoAdi = d.DepoAdi })
+                        .ToList();
+                    return Ok(depots);
+                }
+
+                var ps = await _diaClient.GetPeriodsByFirmaAsync(firmaKodu);
+                var donems = ps.Select(p => p.DonemKodu).Where(d => d > 0).Distinct().ToList();
+                if (donems.Count == 0)
+                    donems = new List<int> { _opt.DefaultSourceDonemKodu > 0 ? _opt.DefaultSourceDonemKodu : 1 };
+
+                var mergedBranches = new Dictionary<long, DiaAuthorizedBranchItem>();
+                foreach (var d in donems)
+                {
+                    var branches = await _diaClient.GetSubelerDepolarForFirmaAsync(firmaKodu, d);
+                    foreach (var b in branches.Where(x => x.Key > 0 && !string.IsNullOrWhiteSpace(x.SubeAdi)))
+                    {
+                        if (!mergedBranches.TryGetValue(b.Key, out var acc))
+                        {
+                            acc = new DiaAuthorizedBranchItem { Key = b.Key, SubeAdi = b.SubeAdi, Depolar = new List<DiaAuthorizedDepotItem>() };
+                            mergedBranches[b.Key] = acc;
+                        }
+                        foreach (var dep in (b.Depolar ?? new List<DiaAuthorizedDepotItem>()).Where(x => x.Key > 0 && !string.IsNullOrWhiteSpace(x.DepoAdi)))
+                        {
+                            if (!(acc.Depolar?.Any(x => x.Key == dep.Key) ?? false))
+                                acc.Depolar!.Add(new DiaAuthorizedDepotItem { Key = dep.Key, DepoAdi = dep.DepoAdi });
+                        }
+                    }
+                }
+
+                var branchesList = mergedBranches.Values.ToList();
+                _branchCache[cacheKey] = (DateTimeOffset.UtcNow, branchesList);
+                var depotsDto = branchesList
+                    .SelectMany(b => b.Depolar ?? new List<DiaAuthorizedDepotItem>())
+                    .Where(d => d.Key > 0 && !string.IsNullOrWhiteSpace(d.DepoAdi))
+                    .GroupBy(d => d.Key)
+                    .Select(g => g.First())
+                    .OrderBy(d => d.DepoAdi, StringComparer.OrdinalIgnoreCase)
+                    .Select(d => new DepotDto { Key = d.Key, DepoAdi = d.DepoAdi })
+                    .ToList();
+                return Ok(depotsDto);
+            }
+            catch
+            {
+                return StatusCode(502, new { message = "Lookup başarısız: tüm depolar alınamadı.", firmaKodu });
+            }
+        }
+
+        [HttpPost("resolve-sube-depo-names")]
+        public async Task<IActionResult> ResolveSubeDepoNames([FromBody] ResolveNamesRequestDto req)
+        {
+            try
+            {
+                if (req.FirmaKodu <= 0 || req.DonemKodu <= 0)
+                    return BadRequest(new { message = "firmaKodu ve donemKodu zorunludur." });
+
+                var wantSube = (req.SubeKeys ?? new List<long>()).Where(k => k > 0).Distinct().ToList();
+                var wantDepo = (req.DepoKeys ?? new List<long>()).Where(k => k > 0).Distinct().ToList();
+
+                // 1) En ucuz ve en güvenli kaynak: yetkili ağaç (firma/dönem/şube/depo) üzerinden global key→ad.
+                // Bazı raporlarda şube/depo key'leri, seçili firma/dönem dışındaki kayıtlara referans verebiliyor.
+                // Bu durumda sis_sube_listele/sis_depo_listele firma context'iyle sonuç dönmeyebiliyor ve UI'da "Bilinmiyor" kalıyor.
+                var ctx = await _diaClient.GetAuthorizedCompanyPeriodBranchAsync();
+                var globalSube = new Dictionary<long, string>();
+                var globalDepo = new Dictionary<long, string>();
+                foreach (var c in ctx)
+                {
+                    foreach (var b in (c.Subeler ?? new List<DiaAuthorizedBranchItem>()))
+                    {
+                        if (b.Key > 0 && !string.IsNullOrWhiteSpace(b.SubeAdi) && !globalSube.ContainsKey(b.Key))
+                            globalSube[b.Key] = b.SubeAdi.Trim();
+                        foreach (var d in (b.Depolar ?? new List<DiaAuthorizedDepotItem>()))
+                        {
+                            if (d.Key > 0 && !string.IsNullOrWhiteSpace(d.DepoAdi) && !globalDepo.ContainsKey(d.Key))
+                                globalDepo[d.Key] = d.DepoAdi.Trim();
+                        }
+                    }
+                }
+
+                var sube = wantSube
+                    .Where(k => globalSube.ContainsKey(k))
+                    .ToDictionary(k => k, k => globalSube[k]);
+                var depo = wantDepo
+                    .Where(k => globalDepo.ContainsKey(k))
+                    .ToDictionary(k => k, k => globalDepo[k]);
+
+                // 2) Fallback: seçili firma/dönem context'inde eksikleri WS liste üzerinden tamamla.
+                var missingSube = wantSube.Where(k => !sube.ContainsKey(k)).ToList();
+                var missingDepo = wantDepo.Where(k => !depo.ContainsKey(k)).ToList();
+                if (missingSube.Count > 0)
+                {
+                    var extra = await _diaClient.ResolveSubeNamesByKeysAsync(req.FirmaKodu, req.DonemKodu, missingSube);
+                    foreach (var kv in extra)
+                        if (!sube.ContainsKey(kv.Key) && !string.IsNullOrWhiteSpace(kv.Value))
+                            sube[kv.Key] = kv.Value.Trim();
+                }
+                if (missingDepo.Count > 0)
+                {
+                    var extra = await _diaClient.ResolveDepoNamesByKeysAsync(req.FirmaKodu, req.DonemKodu, missingDepo);
+                    foreach (var kv in extra)
+                        if (!depo.ContainsKey(kv.Key) && !string.IsNullOrWhiteSpace(kv.Value))
+                            depo[kv.Key] = kv.Value.Trim();
+                }
+                return Ok(new { sube, depo });
+            }
+            catch
+            {
+                return StatusCode(502, new { message = "Lookup başarısız: şube/depo isimleri çözülemedi." });
+            }
+        }
+
+        [HttpPost("resolve-stok-hizmet")]
+        public async Task<IActionResult> ResolveStokHizmet([FromBody] ResolveStokHizmetRequestDto req)
+        {
+            try
+            {
+                if (req.FirmaKodu <= 0 || req.DonemKodu <= 0)
+                    return BadRequest(new { message = "firmaKodu ve donemKodu zorunludur." });
+
+                var map = await _diaClient.ResolveStokHizmetByFiyatKartKeysAsync(
+                    req.FirmaKodu,
+                    req.DonemKodu,
+                    req.FiyatKartKeys ?? new List<long>());
+
+                // JSON key'leri string olarak dönsün (JS tarafı rahat maplesin)
+                var dto = map.ToDictionary(kv => kv.Key.ToString(), kv => new { kodu = kv.Value.kodu, aciklama = kv.Value.aciklama });
+                return Ok(new { map = dto });
+            }
+            catch
+            {
+                return StatusCode(502, new { message = "Lookup başarısız: stok/hizmet kodları çözülemedi." });
+            }
+        }
+
+        [HttpPost("resolve-units")]
+        public async Task<IActionResult> ResolveUnits([FromBody] ResolveUnitsRequestDto req)
+        {
+            try
+            {
+                if (req.FirmaKodu <= 0 || req.DonemKodu <= 0)
+                    return BadRequest(new { message = "firmaKodu ve donemKodu zorunludur." });
+
+                var map = await _diaClient.ResolveUnitByKeysAsync(req.FirmaKodu, req.DonemKodu, req.UnitKeys ?? new List<long>());
+                var dto = map.ToDictionary(kv => kv.Key.ToString(), kv => new { kodu = kv.Value.kodu, adi = kv.Value.adi });
+                return Ok(new { map = dto });
+            }
+            catch
+            {
+                return StatusCode(502, new { message = "Lookup başarısız: birimler çözülemedi." });
+            }
+        }
+
         [HttpGet("depots")]
-        public async Task<IActionResult> GetDepots([FromQuery] int firmaKodu, [FromQuery] long subeKey)
+        public async Task<IActionResult> GetDepots([FromQuery] int firmaKodu, [FromQuery] long subeKey, [FromQuery] int? donemKodu)
         {
             try
             {
@@ -332,7 +576,9 @@ namespace DiaErpIntegration.API.Controllers
                 var company = ctx.FirstOrDefault(c => c.FirmaKodu == firmaKodu);
                 if (company == null || company.Subeler.Count == 0)
                 {
-                    var probeDonem = _opt.DefaultSourceDonemKodu > 0 ? _opt.DefaultSourceDonemKodu : 1;
+                    var probeDonem = (donemKodu.HasValue && donemKodu.Value > 0)
+                        ? donemKodu.Value
+                        : (_opt.DefaultSourceDonemKodu > 0 ? _opt.DefaultSourceDonemKodu : 1);
                     var branchesFallback = await _diaClient.GetSubelerDepolarForFirmaAsync(firmaKodu, probeDonem);
                     var branchFallback = branchesFallback.FirstOrDefault(s => s.Key == subeKey);
                     if (branchFallback == null) return Ok(new List<DepotDto>());
@@ -350,7 +596,9 @@ namespace DiaErpIntegration.API.Controllers
                 if (depotsRaw.Count == 0)
                 {
                     // Bazı tenantlarda yetkili ağaç depoları boş dönebiliyor; sis_depo_* ile fallback.
-                    var probeDonem = company.Donemler.FirstOrDefault()?.DonemKodu
+                    var probeDonem = (donemKodu.HasValue && donemKodu.Value > 0)
+                        ? donemKodu.Value
+                        : company.Donemler.FirstOrDefault()?.DonemKodu
                         ?? company.DonemFallback.FirstOrDefault()?.DonemKodu
                         ?? company.DonemListFallback.FirstOrDefault()?.DonemKodu
                         ?? (_opt.DefaultSourceDonemKodu > 0 ? _opt.DefaultSourceDonemKodu : 1);
@@ -418,6 +666,89 @@ namespace DiaErpIntegration.API.Controllers
             {
                 // UI için fail-safe: boş liste döndür.
                 return Ok(new List<string>());
+            }
+        }
+
+        /// <summary>UI: RAW ve geliştirici için Transfer ayarları (şifre yok).</summary>
+        [HttpGet("transfer-flags")]
+        public IActionResult GetTransferFlags() =>
+            Ok(new
+            {
+                transferRawMode = _opt.TransferRawMode,
+                transferConcurrency = _opt.TransferConcurrency,
+                transferBatchSize = _opt.TransferBatchSize,
+            });
+
+        /// <summary>Hedef firmada cari kart <c>_key</c> — RAW snapshot <c>targetCariKey</c> için.</summary>
+        [HttpGet("resolve-target-cari-key")]
+        public async Task<IActionResult> ResolveTargetCariKey(
+            [FromQuery] int firmaKodu,
+            [FromQuery] int donemKodu,
+            [FromQuery] string? cariKodu)
+        {
+            if (firmaKodu <= 0 || donemKodu <= 0)
+                return BadRequest(new { message = "firmaKodu ve donemKodu zorunlu.", key = (long?)null });
+            if (string.IsNullOrWhiteSpace(cariKodu))
+                return Ok(new { key = (long?)null });
+            try
+            {
+                var key = await _diaClient.FindCariKeyByCodeAsync(firmaKodu, donemKodu, cariKodu.Trim());
+                return Ok(new { key });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "resolve-target-cari-key firma={Firma} donem={Donem}", firmaKodu, donemKodu);
+                return StatusCode(502, new { message = ex.Message, key = (long?)null });
+            }
+        }
+
+        /// <summary>Hedef firmada sis_doviz <c>_key</c> — RAW <c>targetSisDovizKey</c> için.</summary>
+        [HttpGet("resolve-target-doviz-key")]
+        public async Task<IActionResult> ResolveTargetDovizKey(
+            [FromQuery] int firmaKodu,
+            [FromQuery] int donemKodu,
+            [FromQuery] string? dovizKodu)
+        {
+            if (firmaKodu <= 0 || donemKodu <= 0)
+                return BadRequest(new { message = "firmaKodu ve donemKodu zorunlu.", key = (long?)null });
+            if (string.IsNullOrWhiteSpace(dovizKodu))
+                return Ok(new { key = (long?)null });
+            try
+            {
+                var key = await _diaClient.FindDovizKeyByCodeAsync(firmaKodu, donemKodu, dovizKodu.Trim());
+                return Ok(new { key });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "resolve-target-doviz-key firma={Firma} donem={Donem}", firmaKodu, donemKodu);
+                return StatusCode(502, new { message = ex.Message, key = (long?)null });
+            }
+        }
+
+        /// <summary>
+        /// RAW satır zenginleştirme: birim + kalem türü listeleri tek HTTP çağrısında (arka planda 2 DİA listesi, paralel).
+        /// </summary>
+        [HttpGet("raw-line-lookups")]
+        public async Task<IActionResult> GetRawLineLookups([FromQuery] int firmaKodu, [FromQuery] int donemKodu)
+        {
+            if (firmaKodu <= 0 || donemKodu <= 0)
+                return BadRequest(new { message = "firmaKodu ve donemKodu zorunlu." });
+
+            try
+            {
+                var pair = await Task.WhenAll(
+                    _diaClient.GetBirimLookupListAsync(firmaKodu, donemKodu),
+                    _diaClient.GetKalemTuruLookupListAsync(firmaKodu, donemKodu));
+
+                var birimler = pair[0].Select(x => new LookupKeyCodeItem { Key = x.Key, Kod = x.Kod }).ToList();
+                var kalemTurleri = pair[1].Select(x => new LookupKeyCodeItem { Key = x.Key, Kod = x.Kod }).ToList();
+
+                return Ok(new { birimler, kalemTurleri });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "raw-line-lookups firma={Firma} donem={Donem}", firmaKodu, donemKodu);
+                return StatusCode(502, new { message = ex.Message });
             }
         }
 

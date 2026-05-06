@@ -194,11 +194,54 @@ public static class DiaMappers
         if (tut != 0m && kdvTut == 0m && (dur == "H" || dur == "I"))
             return 0m;
 
-        if (l.KdvYuzde.HasValue) return l.KdvYuzde;
-        if (l.KdvOrani.HasValue) return l.KdvOrani;
-        if (l.KdvYuzdesi.HasValue) return l.KdvYuzdesi;
+        decimal? cand =
+            l.KdvYuzde ?? l.KdvOrani ?? l.KdvYuzdesi ?? l.Kdv;
 
-        return l.Kdv;
+        var n = NormalizeExtremeKdvPercent(cand, tut, kdvTut);
+        if (n.HasValue) return n;
+        if (cand is > 0m and <= 100m) return cand.Value;
+        return 0m;
+    }
+
+    /// <summary>RAW snapshot / istemci düzeltmesi — her zaman 0..100.</summary>
+    public static decimal NormalizeSnapshotLineKdvPercent(decimal raw, decimal tutar, decimal? kdvTutari)
+    {
+        var kt = kdvTutari ?? 0m;
+        var n = NormalizeExtremeKdvPercent(raw, tutar, kt);
+        if (n.HasValue) return n.Value;
+        if (raw is >= 0m and <= 100m) return raw;
+        return 0m;
+    }
+
+    /// <summary>
+    /// Bazı tenant&apos;larda KDV % <c>20</c> yerine <c>20000000</c> veya tutar kolonu yüzde sanılarak gelir.
+    /// </summary>
+    private static decimal? NormalizeExtremeKdvPercent(decimal? candidate, decimal tutar, decimal kdvTutari)
+    {
+        if (!candidate.HasValue) return null;
+        var raw = candidate.Value;
+        if (raw is >= 0m and <= 100m) return raw;
+        if (raw < 0m) return 0m;
+
+        var divM = raw / 1_000_000m;
+        if (divM is > 0.01m and <= 100m) return decimal.Round(divM, 4, MidpointRounding.AwayFromZero);
+
+        var div100K = raw / 100_000m;
+        if (div100K is > 0.01m and <= 100m) return decimal.Round(div100K, 4, MidpointRounding.AwayFromZero);
+
+        if (tutar > 0m && kdvTutari > 0m)
+        {
+            var p = kdvTutari / tutar * 100m;
+            if (p is > 0m and <= 100.01m) return decimal.Round(p, 4, MidpointRounding.AwayFromZero);
+        }
+
+        if (tutar > 0m)
+        {
+            var p2 = raw / tutar * 100m;
+            if (p2 is > 0.01m and <= 100.01m) return decimal.Round(p2, 4, MidpointRounding.AwayFromZero);
+        }
+
+        return null;
     }
 
     public static string? ExtractDinamikSubelerRaw(this DiaInvoiceLine src, string? preferredColumn = null)
@@ -208,6 +251,11 @@ public static class DiaMappers
             var preferred = ParsePreferredDynamicColumn(src, preferredColumn);
             if (!string.IsNullOrWhiteSpace(preferred)) return preferred;
         }
+
+        // Bu proje için kritik: kalem şube alanı sadece __dinamik__fatsube.
+        // (Tenant farkı için hala fallback tutuyoruz ama öncelik burası.)
+        var fatsube = ParsePreferredDynamicColumn(src, "__dinamik__fatsube");
+        if (!string.IsNullOrWhiteSpace(fatsube)) return fatsube;
 
         // Öncelik (tenant farkı destekli):
         // 1) m_kalemler[i].__dinamik__1 / __dinamik__2
@@ -284,7 +332,7 @@ public static class DiaMappers
 
     private static bool TryGetNestedDynamic(JsonElement obj, out JsonElement nested)
     {
-        foreach (var name in new[] { "__dinamik__1", "__dinamik__2", "__dinamik__00001", "__dinamik__00002" })
+        foreach (var name in new[] { "__dinamik__fatsube", "__dinamik__1", "__dinamik__2", "__dinamik__00001", "__dinamik__00002" })
         {
             if (obj.TryGetProperty(name, out nested))
                 return true;

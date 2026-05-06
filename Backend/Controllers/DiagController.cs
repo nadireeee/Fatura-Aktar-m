@@ -48,5 +48,12 @@ public sealed class DiagController : ControllerBase
         var cleared = _transfer.ClearTransferState(req.SourceInvoiceKey, req.SourceLineKey);
         return Ok(new { cleared });
     }
+
+    [HttpGet("transfer-state")]
+    public IActionResult GetTransferState([FromQuery] long? sourceInvoiceKey = null)
+    {
+        var snapshot = _transfer.GetTransferStateDebugSnapshot(sourceInvoiceKey);
+        return Ok(snapshot);
+    }
 }
 

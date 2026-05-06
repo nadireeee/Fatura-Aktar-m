@@ -50,6 +50,67 @@ public sealed class DepotDto
     public string DepoAdi { get; set; } = string.Empty;
 }
 
+public sealed class ResolveNamesRequestDto
+{
+    [JsonPropertyName("firmaKodu")]
+    public int FirmaKodu { get; set; }
+
+    [JsonPropertyName("donemKodu")]
+    public int DonemKodu { get; set; }
+
+    [JsonPropertyName("subeKeys")]
+    public List<long> SubeKeys { get; set; } = new();
+
+    [JsonPropertyName("depoKeys")]
+    public List<long> DepoKeys { get; set; } = new();
+}
+
+public sealed class ResolveStokHizmetRequestDto
+{
+    [JsonPropertyName("firmaKodu")]
+    public int FirmaKodu { get; set; }
+
+    [JsonPropertyName("donemKodu")]
+    public int DonemKodu { get; set; }
+
+    [JsonPropertyName("fiyatKartKeys")]
+    public List<long> FiyatKartKeys { get; set; } = new();
+}
+
+/// <summary>RAW satır zenginleştirme: DİA listelerinden key ↔ kod eşlemesi (toplu cache).</summary>
+public sealed class LookupKeyCodeItem
+{
+    [JsonPropertyName("key")]
+    public long Key { get; set; }
+
+    [JsonPropertyName("kod")]
+    public string Kod { get; set; } = string.Empty;
+}
+
+public sealed class ResolveUnitsRequestDto
+{
+    [JsonPropertyName("firmaKodu")]
+    public int FirmaKodu { get; set; }
+
+    [JsonPropertyName("donemKodu")]
+    public int DonemKodu { get; set; }
+
+    [JsonPropertyName("unitKeys")]
+    public List<long> UnitKeys { get; set; } = new();
+}
+
+public sealed class CurrencyDto
+{
+    [JsonPropertyName("key")]
+    public long Key { get; set; }
+
+    [JsonPropertyName("kodu")]
+    public string Kodu { get; set; } = string.Empty;
+
+    [JsonPropertyName("adi")]
+    public string Adi { get; set; } = string.Empty;
+}
+
 public sealed class DefaultSourceContextDto
 {
     [JsonPropertyName("defaultSourceFirmaKodu")]

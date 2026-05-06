@@ -28,6 +28,7 @@ public static class InvoiceDistributableRules
             if (TryGetString(r, dynamicColumn) is { Length: > 0 }) return true;
 
             // tenant varyantları
+            if (TryGetString(r, "__dinamik__fatsube") is { Length: > 0 }) return true;
             if (TryGetString(r, "__dinamik__2") is { Length: > 0 }) return true;
             if (TryGetString(r, "__dinamik__1") is { Length: > 0 }) return true;
             if (TryGetString(r, "__dinamik__00002") is { Length: > 0 }) return true;

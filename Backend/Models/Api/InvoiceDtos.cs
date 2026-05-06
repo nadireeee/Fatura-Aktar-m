@@ -239,6 +239,104 @@ public sealed class InvoiceLineDto
     public string? TargetDonemKodu { get; set; }
 }
 
+/// <summary>RPR / UI snapshot — kaynak scf_fatura_getir yerine kullanılır.</summary>
+public sealed class InvoiceTransferHeaderSnapshotDto
+{
+    [JsonPropertyName("sourceInvoiceKey")]
+    public long SourceInvoiceKey { get; set; }
+
+    [JsonPropertyName("invoiceNo")]
+    public string? InvoiceNo { get; set; }
+
+    [JsonPropertyName("fisNo")]
+    public string? FisNo { get; set; }
+
+    [JsonPropertyName("date")]
+    public string? Date { get; set; }
+
+    [JsonPropertyName("time")]
+    public string? Time { get; set; }
+
+    /// <summary>Örn. Mal Alım / Toptan Satış (görünen etiket).</summary>
+    [JsonPropertyName("invoiceType")]
+    public string? InvoiceType { get; set; }
+
+    /// <summary>DİA fatura türü numerik kodu (scf türü).</summary>
+    [JsonPropertyName("invoiceTypeCode")]
+    public int? InvoiceTypeCode { get; set; }
+
+    [JsonPropertyName("upperProcessCode")]
+    public string? UpperProcessCode { get; set; }
+
+    [JsonPropertyName("cariCode")]
+    public string? CariCode { get; set; }
+
+    [JsonPropertyName("cariName")]
+    public string? CariName { get; set; }
+
+    [JsonPropertyName("currencyCode")]
+    public string? CurrencyCode { get; set; }
+
+    [JsonPropertyName("exchangeRate")]
+    public decimal? ExchangeRate { get; set; }
+
+    [JsonPropertyName("sourceBranchName")]
+    public string? SourceBranchName { get; set; }
+
+    [JsonPropertyName("sourceWarehouseName")]
+    public string? SourceWarehouseName { get; set; }
+
+    [JsonPropertyName("total")]
+    public decimal? Total { get; set; }
+
+    [JsonPropertyName("discount")]
+    public decimal? Discount { get; set; }
+
+    [JsonPropertyName("expense")]
+    public decimal? Expense { get; set; }
+
+    [JsonPropertyName("vat")]
+    public decimal? Vat { get; set; }
+
+    [JsonPropertyName("net")]
+    public decimal? Net { get; set; }
+
+    /// <summary>Kaynak cari kart yetkili kodu — RAW aktarımda hedef firmada aynı kodla _key çözülür.</summary>
+    [JsonPropertyName("cariYetkiliKodu")]
+    public string? CariYetkiliKodu { get; set; }
+
+    // ─── RAW / zero-read mode: istemci hedef firmada çözülmüş DİA _key değerlerini gönderir ───
+
+    [JsonPropertyName("targetCariYetkiliKey")]
+    public long? TargetCariYetkiliKey { get; set; }
+
+    [JsonPropertyName("targetCariKey")]
+    public long? TargetCariKey { get; set; }
+
+    [JsonPropertyName("targetCariAdresKey")]
+    public long? TargetCariAdresKey { get; set; }
+
+    [JsonPropertyName("targetSisDovizKey")]
+    public long? TargetSisDovizKey { get; set; }
+
+    [JsonPropertyName("targetSisDovizRaporlamaKey")]
+    public long? TargetSisDovizRaporlamaKey { get; set; }
+
+    [JsonPropertyName("targetOdemePlaniKey")]
+    public long? TargetOdemePlaniKey { get; set; }
+
+    [JsonPropertyName("targetProjeKey")]
+    public long? TargetProjeKey { get; set; }
+
+    /// <summary>RAW: başlık <c>dovizkuru</c> metni — sunucu formatlamaz.</summary>
+    [JsonPropertyName("headerDovizKuru")]
+    public string? HeaderDovizKuru { get; set; }
+
+    /// <summary>RAW: başlık <c>raporlamadovizkuru</c> metni — sunucu formatlamaz.</summary>
+    [JsonPropertyName("headerRaporlamaDovizKuru")]
+    public string? HeaderRaporlamaDovizKuru { get; set; }
+}
+
 public sealed class InvoiceTransferRequestDto
 {
     [JsonPropertyName("sourceFirmaKodu")]
@@ -263,6 +361,9 @@ public sealed class InvoiceTransferRequestDto
     [JsonPropertyName("selectedLineSnapshots")]
     public List<InvoiceTransferLineSnapshotDto> SelectedLineSnapshots { get; set; } = new();
 
+    [JsonPropertyName("headerSnapshot")]
+    public InvoiceTransferHeaderSnapshotDto? HeaderSnapshot { get; set; }
+
     [JsonPropertyName("targetFirmaKodu")]
     public int TargetFirmaKodu { get; set; }
 
@@ -274,6 +375,13 @@ public sealed class InvoiceTransferRequestDto
 
     [JsonPropertyName("targetDepoKey")]
     public long TargetDepoKey { get; set; }
+
+    /// <summary>
+    /// true: Kalem Şube (dinamik_fatsube) kuralını uygula (Dağıtılacak/Kalem modu).
+    /// false: Kalem Şube'yi tamamen ignore et; hedef şube/depo sadece seçili hedefe göre belirlenir (Tüm Faturalar).
+    /// </summary>
+    [JsonPropertyName("useDynamicBranch")]
+    public bool? UseDynamicBranch { get; set; }
 }
 
 public sealed class InvoiceTransferLineSnapshotDto
@@ -295,6 +403,82 @@ public sealed class InvoiceTransferLineSnapshotDto
 
     [JsonPropertyName("tutar")]
     public decimal? Tutar { get; set; }
+
+    // RPR payload doğrulama / debug için opsiyonel ek alanlar
+    [JsonPropertyName("birimAdi")]
+    public string? BirimAdi { get; set; }
+
+    [JsonPropertyName("indirim")]
+    public decimal? Indirim { get; set; }
+
+    [JsonPropertyName("masraf")]
+    public decimal? Masraf { get; set; }
+
+    /// <summary>STOK / HIZMET — hedefte stok vs hizmet kart çözümü için.</summary>
+    [JsonPropertyName("lineTypeLabel")]
+    public string? LineTypeLabel { get; set; }
+
+    /// <summary>RPR stok/hizmet kodu (stokKartKodu ile aynı; öncelik itemCode).</summary>
+    [JsonPropertyName("itemCode")]
+    public string? ItemCode { get; set; }
+
+    /// <summary>Kalem dinamik şube (__dinamik__fatsube).</summary>
+    [JsonPropertyName("dynamicBranch")]
+    public string? DynamicBranch { get; set; }
+
+    [JsonPropertyName("kdvYuzde")]
+    public decimal? KdvYuzde { get; set; }
+
+    /// <summary>Satır KDV tutarı — sunucu <see cref="InvoiceTransferService"/> ile oranı türetmek için (opsiyonel).</summary>
+    [JsonPropertyName("kdvTutari")]
+    public decimal? KdvTutari { get; set; }
+
+    // ─── RAW / zero-read: hedef kalem anahtarları (zorunlu alanlar TryValidateRawSnapshot ile kontrol edilir) ───
+
+    [JsonPropertyName("targetKeyKalemTuru")]
+    public long? TargetKeyKalemTuru { get; set; }
+
+    [JsonPropertyName("targetKeyKalemBirim")]
+    public long? TargetKeyKalemBirim { get; set; }
+
+    /// <summary>Boşsa başlıktaki <c>targetSisDovizKey</c> kullanılır.</summary>
+    [JsonPropertyName("targetKeySisDoviz")]
+    public long? TargetKeySisDoviz { get; set; }
+
+    [JsonPropertyName("targetKeyScfOdemePlani")]
+    public long? TargetKeyScfOdemePlani { get; set; }
+
+    [JsonPropertyName("targetKeyScfBankaOdemePlani")]
+    public long? TargetKeyScfBankaOdemePlani { get; set; }
+
+    [JsonPropertyName("targetKeyBcsBankahesabi")]
+    public long? TargetKeyBcsBankahesabi { get; set; }
+
+    [JsonPropertyName("targetPrjProjeKey")]
+    public long? TargetPrjProjeKey { get; set; }
+
+    /// <summary>Kalem satırı para birimi (USD/TL); boşsa başlık <c>currencyCode</c>.</summary>
+    [JsonPropertyName("lineCurrencyCode")]
+    public string? LineCurrencyCode { get; set; }
+
+    /// <summary>RPR yerel birim fiyatı (dövizli belgede TL satırı için).</summary>
+    [JsonPropertyName("yerelBirimFiyati")]
+    public decimal? YerelBirimFiyati { get; set; }
+
+    [JsonPropertyName("sonBirimFiyati")]
+    public decimal? SonBirimFiyati { get; set; }
+
+    /// <summary>RAW: istemci gönderirse kullanılır; aksi veya güvenilmez (ör. çapraz dövizde 1) sunucu hesaplar.</summary>
+    [JsonPropertyName("dovizKuru")]
+    public string? DovizKuru { get; set; }
+
+    /// <summary>RAW: satır <c>raporlamadovizkuru</c>.</summary>
+    [JsonPropertyName("raporlamaDovizKuru")]
+    public string? RaporlamaDovizKuru { get; set; }
+
+    /// <summary>MLZM / HZMT; boşsa lineTypeLabel ile tahmin.</summary>
+    [JsonPropertyName("kalemTuru")]
+    public string? KalemTuru { get; set; }
 }
 
 public sealed class InvoiceTransferResultDto
@@ -338,8 +522,23 @@ public sealed class InvoiceTransferResultDto
     [JsonPropertyName("duplicateSkippedCount")]
     public int DuplicateSkippedCount { get; set; }
 
+    /// <summary>Kaynak kalem anahtarları: bu istekte gerçekten aktarılanlar.</summary>
+    [JsonPropertyName("transferredSourceKalemKeys")]
+    public List<long> TransferredSourceKalemKeys { get; set; } = new();
+
+    /// <summary>Kaynak kalem anahtarları: duplicate registry nedeniyle atlananlar.</summary>
+    [JsonPropertyName("duplicateSkippedSourceKalemKeys")]
+    public List<long> DuplicateSkippedSourceKalemKeys { get; set; } = new();
+
     [JsonPropertyName("errors")]
     public List<string> Errors { get; set; } = new();
+
+    /// <summary>
+    /// UI uyarıları: DİA payload'ına eklenmek istenen bazı "extra" alanlar flatten edilemediği için
+    /// (veya güvenlik/tenant uyumsuzluğu nedeniyle) atlandı.
+    /// </summary>
+    [JsonPropertyName("skippedExtraFields")]
+    public List<InvoiceSkippedExtraFieldDto> SkippedExtraFields { get; set; } = new();
 
     // UI için: hatanın hangi aşamada / hangi kodla çıktığı
     [JsonPropertyName("failureStage")]
@@ -359,5 +558,17 @@ public sealed class InvoiceTransferResultDto
 
     [JsonPropertyName("traceId")]
     public string? TraceId { get; set; }
+}
+
+public sealed class InvoiceSkippedExtraFieldDto
+{
+    [JsonPropertyName("scope")]
+    public string Scope { get; set; } = "line"; // header | line
+
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("reason")]
+    public string Reason { get; set; } = string.Empty; // blocked_name | contains_key | not_primitive
 }
 

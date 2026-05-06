@@ -1,6 +1,8 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text;
 using DiaErpIntegration.API.Models;
+using DiaErpIntegration.API.Models.Api;
 using DiaErpIntegration.API.Models.DiaV3Json;
 using DiaErpIntegration.API.Options;
 using Microsoft.Extensions.Logging;
@@ -20,6 +22,14 @@ namespace DiaErpIntegration.API.Services
         private readonly SemaphoreSlim _dynamicColumnGate = new(1, 1);
         private readonly Dictionary<string, (string column, DateTimeOffset cachedAt)> _dynamicColumnCache = new();
 
+        // Kontör optimizasyonu: sık kullanılan lookup sonuçlarını kısa süreli cache'le.
+        private static bool CacheFresh(DateTimeOffset at, int minutes) =>
+            at != DateTimeOffset.MinValue && (DateTimeOffset.UtcNow - at).TotalMinutes < minutes;
+
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset at, List<DiaAuthorizedBranchItem> branches)> _subeDepoCache = new();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset at, long? key)> _cariKeyByCodeCache = new();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (DateTimeOffset at, DiaTargetStockResolveResult res)> _stockResolveCache = new();
+
         public DiaWsClient(HttpClient httpClient, IOptions<DiaOptions> opt, DiaSessionManager session, ILogger<DiaWsClient> logger)
         {
             _httpClient = httpClient;
@@ -33,6 +43,9 @@ namespace DiaErpIntegration.API.Services
 
             if (!baseUrl.EndsWith("/")) baseUrl += "/";
             _httpClient.BaseAddress = new Uri(baseUrl);
+
+            if (_opt.DiaHttpTimeoutSeconds > 0)
+                _httpClient.Timeout = TimeSpan.FromSeconds(_opt.DiaHttpTimeoutSeconds);
         }
 
         public async Task<string> LoginAsync()
@@ -56,6 +69,8 @@ namespace DiaErpIntegration.API.Services
                 HttpResponseMessage? response = null;
                 try
                 {
+                    var reqJson = JsonSerializer.Serialize(request);
+                    _logger.LogInformation("DİA WS request: {json}", reqJson);
                     response = await _httpClient.PostAsJsonAsync(url, request);
                 if (!response.IsSuccessStatusCode)
                 {
@@ -78,7 +93,9 @@ namespace DiaErpIntegration.API.Services
                         throw new Exception($"DIA HTTP Error: {response.StatusCode} at {url} body={(body.Length > 400 ? body[..400] + "…" : body)}");
                 }
 
-                var result = await response.Content.ReadFromJsonAsync<TResponse>();
+                var raw = await response.Content.ReadAsStringAsync();
+                _logger.LogInformation("DİA WS response raw: {response}", raw);
+                var result = JsonSerializer.Deserialize<TResponse>(raw, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 if (result != null)
                 {
                     if (result.Message == "INVALID_SESSION" || result.Code == 401)
@@ -98,6 +115,11 @@ namespace DiaErpIntegration.API.Services
 
                 throw new Exception("DIA Response is null");
             }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "DIA WS HATA ALDI");
+                    throw;
+                }
                 finally
                 {
                     response?.Dispose();
@@ -297,7 +319,6 @@ namespace DiaErpIntegration.API.Services
                             .ToList();
                         return s;
                     })
-                    .Where(s => s.Depolar.Count > 0)
                     .GroupBy(s => s.Key)
                     .Select(g => g.First())
                     .OrderBy(s => s.SubeAdi, StringComparer.OrdinalIgnoreCase)
@@ -775,6 +796,70 @@ namespace DiaErpIntegration.API.Services
             return new DiaInvoiceDetail { Key = key, Lines = new List<DiaInvoiceLine>() };
         }
 
+        /// <summary>
+        /// Üretim: tam dönem listesi yerine en fazla <paramref name="maxPeriodAttempts"/> WS çağrısı.
+        /// Boş satır dönen dönemde bir sonrakine geçer (tam fallback’te ilk boşta çıkış vardı).
+        /// </summary>
+        public async Task<DiaInvoiceDetail> GetInvoiceAsyncWithLimitedDonemFallback(int firmaKodu, int preferredDonemKodu, long key, int maxPeriodAttempts = 3)
+        {
+            if (maxPeriodAttempts <= 0)
+                return new DiaInvoiceDetail { Key = key, Lines = new List<DiaInvoiceLine>() };
+
+            var order = new List<int>();
+            if (preferredDonemKodu > 0) order.Add(preferredDonemKodu);
+            try
+            {
+                var ctx = await GetAuthorizedCompanyPeriodBranchAsync();
+                var company = ctx.FirstOrDefault(c => c.FirmaKodu == firmaKodu);
+                if (company != null)
+                {
+                    foreach (var p in (company.Donemler ?? new List<DiaAuthorizedPeriodItem>()))
+                        if (p.DonemKodu > 0 && !order.Contains(p.DonemKodu)) order.Add(p.DonemKodu);
+                    foreach (var p in (company.DonemFallback ?? new List<DiaAuthorizedPeriodItem>()))
+                        if (p.DonemKodu > 0 && !order.Contains(p.DonemKodu)) order.Add(p.DonemKodu);
+                    foreach (var p in (company.DonemListFallback ?? new List<DiaAuthorizedPeriodItem>()))
+                        if (p.DonemKodu > 0 && !order.Contains(p.DonemKodu)) order.Add(p.DonemKodu);
+                }
+
+                var periods = await GetPeriodsByFirmaAsync(firmaKodu);
+                foreach (var p in periods)
+                {
+                    if (p.DonemKodu > 0 && !order.Contains(p.DonemKodu))
+                        order.Add(p.DonemKodu);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "GetInvoiceAsyncWithLimitedDonemFallback period list failed firma={Firma}", firmaKodu);
+            }
+
+            if (order.Count == 0) order.Add(preferredDonemKodu > 0 ? preferredDonemKodu : 1);
+
+            var toTry = order.Distinct().Where(d => d > 0).Take(maxPeriodAttempts).ToList();
+            Exception? last = null;
+            foreach (var d in toTry)
+            {
+                try
+                {
+                    var r = await GetInvoiceAsync(firmaKodu, d, key);
+                    if (r.Lines is { Count: > 0 })
+                        return r;
+                    _logger.LogWarning(
+                        "scf_fatura_getir returned empty lines (limited fallback tries next). firma={Firma} donem={Donem} key={Key}",
+                        firmaKodu, d, key);
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    _logger.LogWarning(ex, "scf_fatura_getir failed (limited fallback): firma={Firma} donem={Donem} key={Key}", firmaKodu, d, key);
+                }
+            }
+
+            _logger.LogWarning(last, "GetInvoiceAsyncWithLimitedDonemFallback exhausted. firma={Firma} preferredDonem={Donem} key={Key} attempts={Attempts}",
+                firmaKodu, preferredDonemKodu, key, toTry.Count);
+            return new DiaInvoiceDetail { Key = key, Lines = new List<DiaInvoiceLine>() };
+        }
+
         public async Task<List<JsonElement>> GetInvoiceLinesViewAsync(int firmaKodu, int donemKodu, long invoiceKey)
         {
             // Some tenants return null on scf_fatura_getir; use line list view as fallback.
@@ -833,6 +918,10 @@ namespace DiaErpIntegration.API.Services
             // Dokümantasyon: dönem/şube/depo için sis_yetkili_firma_donem_sube_depo veya sis_firma_getir kullan.
             // Bazı tenantlarda sis_sube_listele/sis_depo_listele yok; bu yüzden liste servislerine bağlanmıyoruz.
 
+            var cacheKey = $"{firmaKodu}|{donemKodu}";
+            if (_subeDepoCache.TryGetValue(cacheKey, out var hit) && CacheFresh(hit.at, 30) && hit.branches.Count > 0)
+                return hit.branches;
+
             try
             {
                 var ctx = await GetAuthorizedCompanyPeriodBranchAsync();
@@ -848,12 +937,15 @@ namespace DiaErpIntegration.API.Services
                                 .ToList();
                             return s;
                         })
-                        .Where(s => s.Depolar.Count > 0)
                         .GroupBy(s => s.Key)
                         .Select(g => g.First())
                         .OrderBy(s => s.SubeAdi, StringComparer.OrdinalIgnoreCase)
                         .ToList();
-                    if (branches.Count > 0) return branches;
+                    if (branches.Count > 0)
+                    {
+                        _subeDepoCache[cacheKey] = (DateTimeOffset.UtcNow, branches);
+                        return branches;
+                    }
                 }
             }
             catch (Exception ex)
@@ -867,6 +959,7 @@ namespace DiaErpIntegration.API.Services
                 if (enrich.Subeler.Count > 0)
                 {
                     _logger.LogInformation("Branches from sis_firma_getir: firma={Firma} count={Count}", firmaKodu, enrich.Subeler.Count);
+                    _subeDepoCache[cacheKey] = (DateTimeOffset.UtcNow, enrich.Subeler);
                     return enrich.Subeler;
                 }
             }
@@ -947,6 +1040,11 @@ namespace DiaErpIntegration.API.Services
         {
             if (string.IsNullOrWhiteSpace(cariKartKodu)) return null;
             var kod = cariKartKodu.Trim();
+
+            var ckey = $"{firmaKodu}|{donemKodu}|{kod}";
+            if (_cariKeyByCodeCache.TryGetValue(ckey, out var chit) && CacheFresh(chit.at, 60))
+                return chit.key;
+
             // Tenant farkı: cari kod alanı değişebiliyor veya filter ignore olabiliyor.
             // Bu yüzden hem farklı kolon adlarıyla filtre dene, hem de dönen satırlarda kesin eşleşme ara.
             var filterCandidates = new[]
@@ -974,7 +1072,11 @@ namespace DiaErpIntegration.API.Services
             {
                 var code = Canon(GetString(r, "carikartkodu", "kodu", "kartkodu", "carikodu"));
                 if (!string.IsNullOrWhiteSpace(code) && code == requested)
-                    return GetLong(r, "_key", "key");
+                {
+                    var k = GetLong(r, "_key", "key");
+                    _cariKeyByCodeCache[ckey] = (DateTimeOffset.UtcNow, k);
+                    return k;
+                }
             }
 
             _logger.LogWarning(
@@ -986,6 +1088,7 @@ namespace DiaErpIntegration.API.Services
                 string.Join(", ", rows.Take(8).Select(r => GetString(r, "carikartkodu", "kodu", "kartkodu", "carikodu") ?? "-")));
 
             // kesin eşleşme yoksa yanlış cari'ye düşmemek için NULL döndür (fallback unvan araması üst katmanda var)
+            _cariKeyByCodeCache[ckey] = (DateTimeOffset.UtcNow, null);
             return null;
         }
 
@@ -1044,6 +1147,11 @@ namespace DiaErpIntegration.API.Services
             if (string.IsNullOrWhiteSpace(stokKod))
                 return new DiaTargetStockResolveResult { StokKodu = string.Empty, ServiceUsed = "none", EndpointUsed = "none", RowCount = 0 };
             var kod = stokKod.Trim();
+
+            // Cache key: hedef context + istek (kod + hizmet/stock tercihi). Açıklama doğrulaması TransferService içinde ayrıca yapılıyor.
+            var skey = $"{firmaKodu}|{donemKodu}|{(preferHizmet ? "H" : "S")}|{kod}";
+            if (_stockResolveCache.TryGetValue(skey, out var shit) && CacheFresh(shit.at, 60))
+                return shit.res;
 
             // Bazı firmalarda stok kodları farklı formatta tutulabiliyor (örn. havuz: STK003, hedef: st003).
             // Önce birebir kodu, sonra deterministik alternatifleri dene.
@@ -1225,6 +1333,8 @@ namespace DiaErpIntegration.API.Services
                 return null;
             }
 
+            // ... method continues ...
+
             // IMPORTANT:
             // scf_fatura_ekle payload'ındaki "_key_kalemturu" tenant'a göre "scf_kalemturu" ya da (daha sık) "scf_stokkart" key'i ister.
             // Aynı stokkartkodu için stk/json ve scf/json farklı key uzayları döndürebilir; yanlış key seçimi "lot takiplidir" gibi
@@ -1299,7 +1409,7 @@ namespace DiaErpIntegration.API.Services
                 await TryResolveHizmetKartAsync();
                 if (!stokKartKey.HasValue)
                 {
-                    return new DiaTargetStockResolveResult
+                    var miss = new DiaTargetStockResolveResult
                     {
                         StokKodu = kod,
                         TargetKalemTuruKey = null,
@@ -1312,6 +1422,8 @@ namespace DiaErpIntegration.API.Services
                         MatchedTargetCode = matchedTargetCode,
                         MatchedTargetAciklama = matchedTargetAciklama
                     };
+                    _stockResolveCache[skey] = (DateTimeOffset.UtcNow, miss);
+                    return miss;
                 }
             }
 
@@ -1531,7 +1643,7 @@ namespace DiaErpIntegration.API.Services
                 }
             }
 
-            return new DiaTargetStockResolveResult
+            var final = new DiaTargetStockResolveResult
             {
                 StokKodu = kod,
                 TargetKalemTuruKey = kalemTuruKey,
@@ -1544,6 +1656,8 @@ namespace DiaErpIntegration.API.Services
                 MatchedTargetCode = matchedTargetCode,
                 MatchedTargetAciklama = matchedTargetAciklama
             };
+            _stockResolveCache[skey] = (DateTimeOffset.UtcNow, final);
+            return final;
         }
 
         public async Task<long?> FindKalemBirimKeyAsync(int firmaKodu, int donemKodu, long? targetKalemTuruKey, long? targetStokKartKey, string? sourceBirimText, bool isHizmetKart = false)
@@ -1807,6 +1921,211 @@ namespace DiaErpIntegration.API.Services
             return rows.Select(r => GetLong(r, "_key", "key")).FirstOrDefault(v => v.HasValue);
         }
 
+        public async Task<Dictionary<long, string>> ResolveSubeNamesByKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> keys)
+        {
+            var ks = keys?.Where(k => k > 0).Distinct().ToList() ?? new List<long>();
+            var map = new Dictionary<long, string>();
+            if (ks.Count == 0) return map;
+
+            var candidates = new[]
+            {
+                ("sis/json", "sis_sube_listele"),
+                ("sis/json", "sis_sube_listesi"),
+                ("sis/json", "sis_sube_listele_view"),
+            };
+
+            // Filtre syntax tenant'a göre değişebilir; önce full liste alıp key eşle.
+            var rows = await QueryListByCandidatesAsync(candidates, firmaKodu, donemKodu, string.Empty, 5000, throwOnAllFail: false);
+            foreach (var r in rows)
+            {
+                var k = GetLong(r, "_key", "key");
+                if (!(k is > 0)) continue;
+                if (!ks.Contains(k.Value)) continue;
+                var name = GetString(r, "subeadi", "adi", "unvan", "aciklama", "ad");
+                if (!string.IsNullOrWhiteSpace(name) && !map.ContainsKey(k.Value))
+                    map[k.Value] = name.Trim();
+            }
+            return map;
+        }
+
+        public async Task<Dictionary<long, string>> ResolveDepoNamesByKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> keys)
+        {
+            var ks = keys?.Where(k => k > 0).Distinct().ToList() ?? new List<long>();
+            var map = new Dictionary<long, string>();
+            if (ks.Count == 0) return map;
+
+            var candidates = new[]
+            {
+                ("sis/json", "sis_depo_listele"),
+                ("sis/json", "sis_depo_listesi"),
+                ("sis/json", "sis_depo_listele_view"),
+            };
+
+            var rows = await QueryListByCandidatesAsync(candidates, firmaKodu, donemKodu, string.Empty, 10000, throwOnAllFail: false);
+            foreach (var r in rows)
+            {
+                var k = GetLong(r, "_key", "key");
+                if (!(k is > 0)) continue;
+                if (!ks.Contains(k.Value)) continue;
+                var name = GetString(r, "depoadi", "adi", "aciklama", "ad");
+                if (!string.IsNullOrWhiteSpace(name) && !map.ContainsKey(k.Value))
+                    map[k.Value] = name.Trim();
+            }
+            return map;
+        }
+
+        public async Task<Dictionary<long, (string kodu, string adi)>> ResolveUnitByKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> unitKeys)
+        {
+            var ks = unitKeys?.Where(k => k > 0).Distinct().ToList() ?? new List<long>();
+            var map = new Dictionary<long, (string kodu, string adi)>();
+            if (ks.Count == 0) return map;
+
+            // Tenant farkları: birim listesi farklı servislerde olabilir.
+            var candidates = new (string endpoint, string service)[]
+            {
+                // Genel birim listeleri
+                ("scf/json", "scf_kalem_birimleri_listele"),
+                ("scf/json", "scf_kalem_birimleri_listesi"),
+                ("scf/json", "scf_kalem_birimleri_listele_view"),
+                ("stk/json", "stk_kalem_birimleri_listele"),
+                ("stk/json", "stk_kalem_birimleri_listesi"),
+
+                // Bazı tenantlarda fatura kalemindeki birim key'i kart-birim satır key'i olur
+                ("scf/json", "scf_stokkart_birimleri_listele"),
+                ("scf/json", "scf_stokkart_birimleri_listesi"),
+                ("scf/json", "scf_stokkart_birimleri_listele_view"),
+                ("scf/json", "scf_hizmetkart_birimleri_listele"),
+                ("scf/json", "scf_hizmetkart_birimleri_listesi"),
+                ("scf/json", "scf_hizmetkart_birimleri_listele_view"),
+                ("stk/json", "stk_stokkart_birimleri_listele"),
+                ("stk/json", "stk_stokkart_birimleri_listesi"),
+                ("stk/json", "stk_hizmetkart_birimleri_listele"),
+                ("stk/json", "stk_hizmetkart_birimleri_listesi"),
+
+                // SIS fallback'leri
+                ("sis/json", "sis_stok_birim_listesi"),
+                ("sis/json", "sis_stok_birim_listele"),
+            };
+
+            static string InFilter(string field, List<long> ids)
+                => "(" + string.Join(" OR ", ids.Select(x => $"[{field}] = {x}")) + ")";
+
+            const int chunkSize = 40;
+            for (var i = 0; i < ks.Count; i += chunkSize)
+            {
+                var chunk = ks.Skip(i).Take(chunkSize).ToList();
+                var f = InFilter("_key", chunk);
+                var rows = await QueryListByCandidatesAsync(candidates, firmaKodu, donemKodu, f, 5000, throwOnAllFail: false);
+
+                // Filter ignore olursa row çok gelebilir; yine de key eşlemesi yapıyoruz.
+                foreach (var r in rows)
+                {
+                    var k = GetLong(r, "_key", "key", "_key_scf_kalem_birimleri");
+                    if (!(k is > 0)) continue;
+                    if (!chunk.Contains(k.Value)) continue;
+                    if (map.ContainsKey(k.Value)) continue;
+
+                    var kodu = GetString(r, "kodu", "birimkodu", "kod", "birim_kodu");
+                    var adi = GetString(r, "adi", "aciklama", "ad", "birimadi", "birim_adi");
+                    if (string.IsNullOrWhiteSpace(kodu) && string.IsNullOrWhiteSpace(adi)) continue;
+                    map[k.Value] = ((kodu ?? string.Empty).Trim(), (adi ?? string.Empty).Trim());
+                }
+            }
+            return map;
+        }
+
+        public async Task<Dictionary<long, (string kodu, string aciklama)>> ResolveStokHizmetByFiyatKartKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> fiyatKartKeys)
+        {
+            var ks = fiyatKartKeys?.Where(k => k > 0).Distinct().ToList() ?? new List<long>();
+            var outMap = new Dictionary<long, (string kodu, string aciklama)>();
+            if (ks.Count == 0) return outMap;
+
+            // Basit in-filter builder (DIA filter dili)
+            static string InFilter(string field, List<long> ids)
+                => "(" + string.Join(" OR ", ids.Select(x => $"[{field}] = {x}")) + ")";
+
+            // 1) Fiyatkart -> _key_scf_kart
+            var fiyatCandidates = new[]
+            {
+                ("scf/json", "scf_fiyatkart_listele"),
+                ("scf/json", "scf_fiyatkart_listesi"),
+                ("scf/json", "scf_fiyatkart_listele_view"),
+            };
+
+            var fiyatRows = new List<JsonElement>();
+            const int chunkSize = 50;
+            for (var i = 0; i < ks.Count; i += chunkSize)
+            {
+                var chunk = ks.Skip(i).Take(chunkSize).ToList();
+                var f = InFilter("_key", chunk);
+                var rows = await QueryListByCandidatesAsync(fiyatCandidates, firmaKodu, donemKodu, f, 500, throwOnAllFail: false);
+                if (rows.Count > 0) fiyatRows.AddRange(rows);
+            }
+
+            var fiyatToKart = new Dictionary<long, long>();
+            foreach (var r in fiyatRows)
+            {
+                var fk = GetLong(r, "_key", "key");
+                if (!(fk is > 0)) continue;
+                var kk = GetLong(r, "_key_scf_kart", "key_scf_kart");
+                if (kk is > 0)
+                    fiyatToKart[fk.Value] = kk.Value;
+
+                // bazı tenantlarda kod/aciklama fiyatkart üstünde yeterli
+                var kod = GetString(r, "fiyatkartkodu", "kartkodu", "kodu");
+                var ac = GetString(r, "aciklama", "adi");
+                if (!string.IsNullOrWhiteSpace(kod) && !outMap.ContainsKey(fk.Value))
+                    outMap[fk.Value] = (kod.Trim(), (ac ?? "").Trim());
+            }
+
+            var kartKeys = fiyatToKart.Values.Where(k => k > 0).Distinct().ToList();
+            if (kartKeys.Count == 0) return outMap;
+
+            // 2) Kart key'leri ile stok/hizmet kart listelerini dene (hangisi dönerse)
+            var stokRowsAll = new List<JsonElement>();
+            var hizmetRowsAll = new List<JsonElement>();
+            for (var i = 0; i < kartKeys.Count; i += chunkSize)
+            {
+                var chunk = kartKeys.Skip(i).Take(chunkSize).ToList();
+                var f = InFilter("_key", chunk);
+                var sr = await QueryListByCandidatesAsync(new[] { ("scf/json", "scf_stokkart_listele") }, firmaKodu, donemKodu, f, 500, throwOnAllFail: false);
+                if (sr.Count > 0) stokRowsAll.AddRange(sr);
+                var hr = await QueryListByCandidatesAsync(new[] { ("scf/json", "scf_hizmetkart_listele") }, firmaKodu, donemKodu, f, 500, throwOnAllFail: false);
+                if (hr.Count > 0) hizmetRowsAll.AddRange(hr);
+            }
+
+            var stokByKey = stokRowsAll
+                .Where(r => (GetLong(r, "_key", "key") ?? 0) > 0)
+                .ToDictionary(r => GetLong(r, "_key", "key")!.Value, r => r);
+            var hizmetByKey = hizmetRowsAll
+                .Where(r => (GetLong(r, "_key", "key") ?? 0) > 0)
+                .ToDictionary(r => GetLong(r, "_key", "key")!.Value, r => r);
+
+            foreach (var (fiyatKey, kartKey) in fiyatToKart)
+            {
+                if (outMap.ContainsKey(fiyatKey) && !string.IsNullOrWhiteSpace(outMap[fiyatKey].kodu))
+                    continue;
+
+                if (stokByKey.TryGetValue(kartKey, out var sr))
+                {
+                    var kod = GetString(sr, "stokkartkodu", "kartkodu", "kodu", "stokkodu");
+                    var ac = GetString(sr, "aciklama", "adi", "stokadi");
+                    if (!string.IsNullOrWhiteSpace(kod))
+                        outMap[fiyatKey] = (kod.Trim(), (ac ?? "").Trim());
+                    continue;
+                }
+                if (hizmetByKey.TryGetValue(kartKey, out var hr))
+                {
+                    var kod = GetString(hr, "hizmetkartkodu", "kartkodu", "kodu", "hizmetkodu");
+                    var ac = GetString(hr, "aciklama", "adi");
+                    if (!string.IsNullOrWhiteSpace(kod))
+                        outMap[fiyatKey] = (kod.Trim(), (ac ?? "").Trim());
+                }
+            }
+
+            return outMap;
+        }
+
         public async Task<long?> FindDovizKeyByCodeAsync(int firmaKodu, int donemKodu, string dovizKodu)
         {
             var rows = await QueryListAsync("sis/json", "sis_doviz_listele", firmaKodu, donemKodu, string.Empty, 500);
@@ -1839,6 +2158,63 @@ namespace DiaErpIntegration.API.Services
                 })
                 .Where(x => x.Key > 0)
                 .ToList();
+        }
+
+        public async Task<IReadOnlyList<LookupKeyCodeItem>> GetKalemTuruLookupListAsync(int firmaKodu, int donemKodu)
+        {
+            var rows = await QueryListAsync("scf/json", "scf_kalemturu_listele", firmaKodu, donemKodu, string.Empty, 5000);
+            var list = new List<LookupKeyCodeItem>();
+            foreach (var r in rows)
+            {
+                var key = GetLong(r, "_key", "key");
+                if (!(key > 0)) continue;
+
+                foreach (var fld in new[] { "kisaack", "kodu", "kod", "turu", "ack", "aciklama" })
+                {
+                    var s = GetString(r, fld);
+                    if (string.IsNullOrWhiteSpace(s)) continue;
+                    list.Add(new LookupKeyCodeItem { Key = key!.Value, Kod = s.Trim() });
+                }
+            }
+
+            return list;
+        }
+
+        public async Task<IReadOnlyList<LookupKeyCodeItem>> GetBirimLookupListAsync(int firmaKodu, int donemKodu)
+        {
+            var candidates = new (string endpoint, string service)[]
+            {
+                ("sis/json", "sis_stok_birim_listesi"),
+                ("sis/json", "sis_stok_birim_listele"),
+                ("scf/json", "scf_kalem_birimleri_listele"),
+                ("scf/json", "scf_kalem_birimleri_listesi"),
+                ("stk/json", "stk_kalem_birimleri_listele"),
+                ("stk/json", "stk_kalem_birimleri_listesi"),
+            };
+
+            var rows = await QueryListByCandidatesAsync(candidates, firmaKodu, donemKodu, string.Empty, 8000, throwOnAllFail: false);
+            var list = new List<LookupKeyCodeItem>();
+            foreach (var r in rows)
+            {
+                var key = GetLong(r, "_key", "key", "_key_scf_kalem_birimleri", "_key_sis_stok_birim", "_key_sis_stok_birim_listesi");
+                if (!(key > 0)) continue;
+
+                foreach (var fld in new[] { "kodu", "birimkodu", "kod", "birim_kodu" })
+                {
+                    var s = GetString(r, fld);
+                    if (string.IsNullOrWhiteSpace(s)) continue;
+                    list.Add(new LookupKeyCodeItem { Key = key!.Value, Kod = s.Trim() });
+                }
+
+                foreach (var fld in new[] { "adi", "aciklama", "ad", "birimadi", "birim_adi" })
+                {
+                    var s = GetString(r, fld);
+                    if (string.IsNullOrWhiteSpace(s)) continue;
+                    list.Add(new LookupKeyCodeItem { Key = key!.Value, Kod = s.Trim() });
+                }
+            }
+
+            return list;
         }
 
         public async Task<string?> FindDovizKuruByDateAsync(int firmaKodu, int donemKodu, long sisDovizKey, string tarih)
@@ -1949,6 +2325,111 @@ namespace DiaErpIntegration.API.Services
                 firmaKodu, donemKodu, filters, 50, throwOnAllFail: false);
 
             return rows.Select(r => GetLong(r, "_key", "key")).FirstOrDefault(v => v.HasValue && v.Value > 0);
+        }
+
+        public async Task<List<JsonElement>> GetRprReportRowsAsync(
+            int firmaKodu,
+            int donemKodu,
+            string reportCode,
+            Dictionary<string, object?> param,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(reportCode))
+                throw new ArgumentException("reportCode is required.", nameof(reportCode));
+
+            var sid = await _session.GetSessionIdAsync(cancellationToken);
+
+            var req = new DiaRprRaporSonucGetirRequest
+            {
+                Payload = new DiaRprRaporSonucGetirInput
+                {
+                    SessionId = sid,
+                    FirmaKodu = firmaKodu,
+                    DonemKodu = donemKodu,
+                    ReportCode = reportCode.Trim(),
+                    FormatType = "json",
+                    Param = param ?? new Dictionary<string, object?>()
+                }
+            };
+
+            // Result shape tenant/versiyon farkı gösterebilir:
+            // - result: { data: "<base64>" }
+            // - result: "<base64>"
+            var res = await PostAsync<DiaRprRaporSonucGetirRequest, DiaWsResponse<JsonElement>>("rpr/json", req);
+            if (res.Code != 200)
+                throw new InvalidOperationException($"DIA rpr_raporsonuc_getir failed. code={res.Code} msg={res.Message}");
+
+            var base64 = ExtractBase64FromRprResult(res.Result);
+            if (string.IsNullOrWhiteSpace(base64))
+                return new List<JsonElement>();
+
+            try
+            {
+                var decodedJson = DecodeBase64ToUtf8(base64);
+                // DecodeBase64ToUtf8 hata durumunda throw eder; burada boş string'i "veri yok" gibi yutmayız.
+                if (string.IsNullOrWhiteSpace(decodedJson))
+                    throw new InvalidOperationException("Rapor verisi decode edilemedi.");
+                using var doc = JsonDocument.Parse(decodedJson);
+                var root = doc.RootElement;
+
+                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("__rows", out var rowsEl) &&
+                    rowsEl.ValueKind == JsonValueKind.Array)
+                {
+                    return rowsEl.EnumerateArray().Select(x => x.Clone()).ToList();
+                }
+
+                // bazı formatlarda üst seviye "result" veya "data" altında gelebilir
+                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("result", out var inner) &&
+                    inner.ValueKind == JsonValueKind.Object && inner.TryGetProperty("__rows", out var rowsEl2) &&
+                    rowsEl2.ValueKind == JsonValueKind.Array)
+                {
+                    return rowsEl2.EnumerateArray().Select(x => x.Clone()).ToList();
+                }
+
+                return new List<JsonElement>();
+            }
+            catch (Exception ex)
+            {
+                var suffix = _session.GetDiagnosticsSessionSuffix();
+                _logger.LogError(ex, "DIA WS HATA (RPR). reportCode={ReportCode} firma={Firma} donem={Donem} sessionSuffix={Suffix}", reportCode, firmaKodu, donemKodu, suffix);
+                throw;
+            }
+        }
+
+        private static string? ExtractBase64FromRprResult(JsonElement? result)
+        {
+            if (result is null) return null;
+            var r = result.Value;
+
+            if (r.ValueKind == JsonValueKind.String)
+                return r.GetString();
+
+            if (r.ValueKind == JsonValueKind.Object)
+            {
+                if (r.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == JsonValueKind.String)
+                    return dataEl.GetString();
+
+                if (r.TryGetProperty("result", out var inner) && inner.ValueKind == JsonValueKind.String)
+                    return inner.GetString();
+            }
+
+            return null;
+        }
+
+        private string DecodeBase64ToUtf8(string base64)
+        {
+            try
+            {
+                // DIA bazı cevaplarda base64 string'i satır sonları ile bölebiliyor.
+                var trimmed = new string(base64.Where(c => !char.IsWhiteSpace(c)).ToArray());
+                var bytes = Convert.FromBase64String(trimmed);
+                return Encoding.UTF8.GetString(bytes);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Base64 decode failed (rpr_raporsonuc_getir).");
+                throw;
+            }
         }
 
         private async Task<List<JsonElement>> QueryListAsync(string endpoint, string serviceName, int firmaKodu, int donemKodu, string filters, int limit)

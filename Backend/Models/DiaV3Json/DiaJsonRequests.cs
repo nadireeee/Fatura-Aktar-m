@@ -263,6 +263,9 @@ public sealed class DiaInvoiceAddLineInput
     [JsonPropertyName("dovizkuru")]
     public string? DovizKuru { get; set; }
 
+    [JsonPropertyName("raporlamadovizkuru")]
+    public string? RaporlamaDovizKuru { get; set; }
+
     [JsonPropertyName("sirano")]
     public int? SiraNo { get; set; }
 

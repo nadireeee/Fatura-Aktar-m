@@ -164,6 +164,7 @@ html, body, #root {
 }
 /* Havuz fatura listesi: seçim yokken tüm yükseklik; kalem açılınca üst/alt bölünür */
 .erp-section-invoices {
+  order: 0;
   min-height: 200px;
   display: flex;
   flex-direction: column;
@@ -178,10 +179,22 @@ html, body, #root {
   max-height: min(46vh, 520px);
   min-height: 180px;
 }
-/* Kalemler — yalnızca fatura seçilince; kalan alanı kaplar */
-.erp-section-lines    { flex: 1; min-height: 180px; max-height: min(50vh, 560px); }
-/* Log bölümü — küçük sabit */
-.erp-section-log      { flex: 0 0 auto; max-height: 140px; }
+/* Kalemler — fatura seçilince; invoice(0) sonrası, log’dan önce (order:1) */
+.erp-section-lines {
+  order: 1;
+  flex: 1 1 auto;
+  min-height: 200px;
+  max-height: min(62vh, 720px);
+}
+/* İşlem günlüğü — sütunun en altında (order:2), kaydırmalı şerit */
+.erp-section-log {
+  order: 2;
+  flex: 0 0 auto;
+  max-height: min(36vh, 260px);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 .erp-section-viewer   {
   flex: 1;
   min-height: 0;
@@ -242,6 +255,14 @@ html, body, #root {
   background: linear-gradient(180deg, #2b3d66 0%, #1f2f52 100%);
   position: sticky; top: 0; z-index: 2;
 }
+
+/* Nested tables (Son Aktarılan detail) */
+.erp-table-nested thead tr {
+  /* Outer table header zaten sticky; nested header sticky olunca üstte kayboluyor. */
+  position: static;
+  top: auto;
+  z-index: auto;
+}
 .erp-table th {
   padding: 5px 9px;
   font-size: 10px; font-weight: 700;
@@ -266,6 +287,20 @@ html, body, #root {
 .erp-table td:last-child { border-right: none; }
 .erp-cell-std { font-size: 12.5px !important; color: #1f2937; }
 
+/* Nested/inner tables: always-visible "fake header" row */
+.erp-fake-thead td{
+  background: linear-gradient(180deg, #2b3d66 0%, #1f2f52 100%);
+  color: #f8fafc;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 2px solid #18253f;
+  border-right: 1px solid #415174;
+  white-space: nowrap;
+}
+.erp-fake-thead td:last-child { border-right: none; }
+
 /* Satır stilleri */
 .erp-row         { cursor: pointer; transition: background 0.08s, box-shadow 0.08s; }
 /* Zebra satırlar */
@@ -287,6 +322,31 @@ html, body, #root {
 }
 .erp-row-done    { background: var(--row-done); }
 .erp-row-done td { color: #9ca3af; }
+
+.erp-row-transferred {
+  background: #86efac !important;
+  box-shadow: inset 4px 0 0 0 #166534;
+}
+.erp-row-transferred td { color: #064e3b; font-weight: 750; }
+.erp-row-transferred .erp-transfer-st { background: transparent; }
+.erp-row-transferred:hover {
+  background: #86efac !important;
+  box-shadow: inset 4px 0 0 0 #166534 !important;
+}
+
+.erp-row-invalid {
+  background: #fef2f2 !important;
+  box-shadow: inset 4px 0 0 0 #dc2626;
+}
+.erp-row-invalid td { color: #991b1b; font-weight: 600; }
+
+/* Snapshot uyarısı: zebra satırı beyaz kalsın; sadece ince sol çizgi */
+.erp-row-snapshot-warn {
+  box-shadow: inset 3px 0 0 0 #f59e0b;
+}
+.erp-row-snapshot-warn td {
+  color: inherit;
+}
 
 /* Daha net checkbox/radio */
 .erp-cb, .erp-radio {
@@ -316,6 +376,53 @@ html, body, #root {
   background: #eef1f6; color: #374151;
   font-size: 10px; font-weight: 600;
   padding: 1px 6px; border: 1px solid #d1d5db;
+}
+.erp-sube-tag--accent {
+  background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+  color: #92400e;
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.25);
+}
+.erp-filter-kalem-sube {
+  border: 2px solid #f59e0b !important;
+  background: linear-gradient(180deg, #fffbeb 0%, #ffffff 100%);
+  border-radius: 4px;
+}
+.erp-filter-kalem-sube:focus {
+  outline: 2px solid #d97706;
+  outline-offset: 1px;
+}
+.erp-transfer-st {
+  display: inline-block;
+  min-width: 86px;
+  text-align: center;
+  padding: 1px 7px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  font-weight: 900;
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.erp-transfer-st-done {
+  background: #dcfce7;
+  border-color: #86efac;
+  color: #065f46;
+}
+.erp-transfer-st-partial {
+  background: #fef3c7;
+  border-color: #fcd34d;
+  color: #92400e;
+}
+.erp-transfer-st-wait {
+  background: #ffffff;
+  border-color: #d1d5db;
+  color: #111827;
+}
+.erp-transfer-st-other {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #7f1d1d;
 }
 /* Hedef tag */
 .erp-hedef-tag {
@@ -439,7 +546,11 @@ html, body, #root {
 .erp-ts-val   { font-size: 12px; font-weight: 700; color: var(--accent); }
 
 /* ══ LOG PANELİ ═════════════════════════════════════════════════════════════ */
-.erp-log-panel { overflow-y: auto; max-height: 110px; }
+.erp-log-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
 .erp-log-row {
   display: flex; align-items: flex-start; gap: 7px;
   padding: 4px 10px; font-size: 11px;

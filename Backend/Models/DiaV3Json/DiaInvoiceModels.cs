@@ -141,6 +141,13 @@ public sealed class DiaInvoiceDetail
     [JsonPropertyName("carikartkodu")]
     public string? CariKartKoduPlain { get; set; }
 
+    // Bazı tenant / WS yanıtlarında kod bu alan adlarıyla gelir (__ önekli değil).
+    [JsonPropertyName("cari_kodu")]
+    public string? CariKoduSnake { get; set; }
+
+    [JsonPropertyName("carikodu")]
+    public string? CariKoduCompact { get; set; }
+
     [JsonPropertyName("cariunvan")]
     public string? CariUnvanPlain { get; set; }
 
@@ -255,43 +262,55 @@ public sealed class DiaInvoiceLine
     public string? KalemTuruRaw { get; set; }
 
     [JsonPropertyName("miktar")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? Miktar { get; set; }
 
     [JsonPropertyName("birimfiyati")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? BirimFiyati { get; set; }
 
     [JsonPropertyName("sonbirimfiyati")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? SonBirimFiyati { get; set; }
 
     [JsonPropertyName("yerelbirimfiyati")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? YerelBirimFiyati { get; set; }
 
     [JsonPropertyName("tutari")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? Tutari { get; set; }
 
     [JsonPropertyName("kdv")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? Kdv { get; set; }
 
     // Bazı tenantlarda KDV yüzdesi ayrı alanda gelir; `kdv` başka anlam taşıyabiliyor.
     [JsonPropertyName("kdvyuzde")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? KdvYuzde { get; set; }
 
     [JsonPropertyName("kdvorani")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? KdvOrani { get; set; }
 
     [JsonPropertyName("kdvyuzdesi")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? KdvYuzdesi { get; set; }
 
     [JsonPropertyName("kdvtutari")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? KdvTutari { get; set; }
 
     [JsonPropertyName("kdvdurumu")]
     public string? KdvDurumuRaw { get; set; }
 
     [JsonPropertyName("dovizkuru")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? DovizKuru { get; set; }
 
     [JsonPropertyName("indirimtoplam")]
+    [JsonConverter(typeof(DiaLooseNullableDecimalConverter))]
     public decimal? IndirimToplam { get; set; }
 
     [JsonPropertyName("note")]

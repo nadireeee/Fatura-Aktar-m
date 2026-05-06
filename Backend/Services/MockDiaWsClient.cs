@@ -1,4 +1,5 @@
 using DiaErpIntegration.API.Models;
+using DiaErpIntegration.API.Models.Api;
 using System.Text.Json;
 using DiaErpIntegration.API.Models.DiaV3Json;
 
@@ -43,6 +44,18 @@ public class MockDiaWsClient : IDiaWsClient
         public Task<string> LoginAsync() => Task.FromResult("mock_session_id");
 
         public Task LogoutAsync() => Task.CompletedTask;
+
+        public Task<Dictionary<long, string>> ResolveSubeNamesByKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> keys)
+            => Task.FromResult(new Dictionary<long, string>());
+
+        public Task<Dictionary<long, string>> ResolveDepoNamesByKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> keys)
+            => Task.FromResult(new Dictionary<long, string>());
+
+        public Task<Dictionary<long, (string kodu, string aciklama)>> ResolveStokHizmetByFiyatKartKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> fiyatKartKeys)
+            => Task.FromResult(new Dictionary<long, (string kodu, string aciklama)>());
+
+        public Task<Dictionary<long, (string kodu, string adi)>> ResolveUnitByKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> unitKeys)
+            => Task.FromResult(new Dictionary<long, (string kodu, string adi)>());
 
         public Task<List<DiaErpIntegration.API.Models.DiaV3Json.DiaAuthorizedCompanyPeriodBranchItem>> GetAuthorizedCompanyPeriodBranchAsync()
         {
@@ -314,7 +327,28 @@ public class MockDiaWsClient : IDiaWsClient
         public Task<long?> FindBankaHesabiKeyByHesapKoduAsync(int firmaKodu, int donemKodu, string hesapKodu) => Task.FromResult<long?>(1);
         public Task<long?> FindProjeKeyByCodeAsync(int firmaKodu, int donemKodu, string projeKodu) => Task.FromResult<long?>(1);
         public Task<long?> FindDovizKeyByCodeAsync(int firmaKodu, int donemKodu, string dovizKodu) => Task.FromResult<long?>(1);
+
+        public Task<IReadOnlyList<LookupKeyCodeItem>> GetKalemTuruLookupListAsync(int firmaKodu, int donemKodu)
+            => Task.FromResult<IReadOnlyList<LookupKeyCodeItem>>(new List<LookupKeyCodeItem>
+            {
+                new() { Key = 1, Kod = "MLZM" },
+                new() { Key = 2, Kod = "HZMT" },
+                new() { Key = 1, Kod = "Malzeme" },
+                new() { Key = 2, Kod = "Hizmet" },
+            });
+
+        public Task<IReadOnlyList<LookupKeyCodeItem>> GetBirimLookupListAsync(int firmaKodu, int donemKodu)
+            => Task.FromResult<IReadOnlyList<LookupKeyCodeItem>>(new List<LookupKeyCodeItem>
+            {
+                new() { Key = 100, Kod = "ADET" },
+                new() { Key = 101, Kod = "KG" },
+                new() { Key = 102, Kod = "MT" },
+            });
+
         public Task<DiaInvoiceDetail> GetInvoiceAsyncWithDonemFallback(int firmaKodu, int preferredDonemKodu, long key)
+            => GetInvoiceAsync(firmaKodu, preferredDonemKodu, key);
+
+        public Task<DiaInvoiceDetail> GetInvoiceAsyncWithLimitedDonemFallback(int firmaKodu, int preferredDonemKodu, long key, int maxPeriodAttempts = 3)
             => GetInvoiceAsync(firmaKodu, preferredDonemKodu, key);
 
         public Task<List<JsonElement>> GetInvoiceLinesViewAsync(int firmaKodu, int donemKodu, long invoiceKey)
@@ -376,5 +410,50 @@ public class MockDiaWsClient : IDiaWsClient
 
         public Task<long?> FindCariYetkiliKeyByCodeAsync(int firmaKodu, int donemKodu, string cariKartKodu, string yetkiliKodu)
             => Task.FromResult<long?>(null);
+
+        public Task<List<JsonElement>> GetRprReportRowsAsync(
+            int firmaKodu,
+            int donemKodu,
+            string reportCode,
+            Dictionary<string, object?> param,
+            CancellationToken cancellationToken = default)
+        {
+            // Mock: filtreleri sadece echo amaçlı taşır, UI'ı geliştirme sırasında bloklamaz.
+            var now = DateTimeOffset.UtcNow.ToString("O");
+            var rows = new List<JsonElement>
+            {
+                JsonSerializer.SerializeToElement(new Dictionary<string, object?>
+                {
+                    ["fatura_key"] = 192122,
+                    ["cari_adi"] = "MOCK CARI A",
+                    ["tutar"] = 122.00m,
+                    ["kdv"] = 0.00m,
+                    ["indirimtoplam"] = 0.00m,
+                    ["tarih"] = "2025-08-01",
+                    ["report_code"] = reportCode,
+                    ["generated_at_utc"] = now,
+                }),
+                JsonSerializer.SerializeToElement(new Dictionary<string, object?>
+                {
+                    ["fatura_key"] = 241897,
+                    ["cari_adi"] = "MOCK CARI B",
+                    ["tutar"] = 24000.00m,
+                    ["kdv"] = 114.91m,
+                    ["indirimtoplam"] = 0.00m,
+                    ["tarih"] = "2025-10-17",
+                    ["report_code"] = reportCode,
+                    ["generated_at_utc"] = now,
+                }),
+                JsonSerializer.SerializeToElement(new Dictionary<string, object?>
+                {
+                    ["_debug"] = true,
+                    ["firma_kodu"] = firmaKodu,
+                    ["donem_kodu"] = donemKodu,
+                    ["param"] = param,
+                }),
+            };
+
+            return Task.FromResult(rows);
+        }
     }
 }

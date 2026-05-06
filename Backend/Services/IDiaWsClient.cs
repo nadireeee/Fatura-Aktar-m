@@ -1,4 +1,5 @@
 using DiaErpIntegration.API.Models;
+using DiaErpIntegration.API.Models.Api;
 using DiaErpIntegration.API.Models.DiaV3Json;
 using System.Text.Json;
 
@@ -25,6 +26,8 @@ namespace DiaErpIntegration.API.Services
         // Alt grid: scf_fatura_getir (result.m_kalemler)
         Task<DiaInvoiceDetail> GetInvoiceAsync(int firmaKodu, int donemKodu, long key);
         Task<DiaInvoiceDetail> GetInvoiceAsyncWithDonemFallback(int firmaKodu, int preferredDonemKodu, long key);
+        /// <summary>scf_fatura_getir — en fazla N dönem dene; satır doluysa dön, aksi halde boş.</summary>
+        Task<DiaInvoiceDetail> GetInvoiceAsyncWithLimitedDonemFallback(int firmaKodu, int preferredDonemKodu, long key, int maxPeriodAttempts = 3);
         
         // Alt grid fallback: scf_fatura_kalemi_liste_view (some tenants: scf_fatura_getir returns null)
         Task<List<JsonElement>> GetInvoiceLinesViewAsync(int firmaKodu, int donemKodu, long invoiceKey);
@@ -56,11 +59,29 @@ namespace DiaErpIntegration.API.Services
         Task<long?> FindCariYetkiliKeyByCodeAsync(int firmaKodu, int donemKodu, string cariKartKodu, string yetkiliKodu);
         Task<long?> FindProjeKeyByCodeAsync(int firmaKodu, int donemKodu, string projeKodu);
         Task<long?> FindDovizKeyByCodeAsync(int firmaKodu, int donemKodu, string dovizKodu);
+        /// <summary>scf_kalemturu_listele — RAW <c>targetKeyKalemTuru</c> için toplu kod listesi.</summary>
+        Task<IReadOnlyList<LookupKeyCodeItem>> GetKalemTuruLookupListAsync(int firmaKodu, int donemKodu);
+        /// <summary>sis/scf birim listeleri — RAW <c>targetKeyKalemBirim</c> için toplu eşleme (tenant’a göre servis seçilir).</summary>
+        Task<IReadOnlyList<LookupKeyCodeItem>> GetBirimLookupListAsync(int firmaKodu, int donemKodu);
         Task<List<DiaErpIntegration.API.Models.DiaV3Json.DiaAuthorizedCurrencyItem>> GetCurrenciesAsync(int firmaKodu, int donemKodu);
         Task<string?> FindDovizKuruByDateAsync(int firmaKodu, int donemKodu, long sisDovizKey, string tarih);
         Task<long?> FindInvoiceOdemePlaniKeyFromDetailAsync(int firmaKodu, int donemKodu, long invoiceKey);
 
         Task<long?> FindSatisElemaniKeyByCodeAsync(int firmaKodu, int donemKodu, string satisElemaniKodu);
+
+        Task<Dictionary<long, string>> ResolveSubeNamesByKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> keys);
+        Task<Dictionary<long, string>> ResolveDepoNamesByKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> keys);
+
+        Task<Dictionary<long, (string kodu, string aciklama)>> ResolveStokHizmetByFiyatKartKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> fiyatKartKeys);
+        Task<Dictionary<long, (string kodu, string adi)>> ResolveUnitByKeysAsync(int firmaKodu, int donemKodu, IEnumerable<long> unitKeys);
+
+        // RPR özel rapor sonucu (base64 -> json -> __rows)
+        Task<List<JsonElement>> GetRprReportRowsAsync(
+            int firmaKodu,
+            int donemKodu,
+            string reportCode,
+            Dictionary<string, object?> param,
+            CancellationToken cancellationToken = default);
     }
 }
 

@@ -1,5 +1,6 @@
 using DiaErpIntegration.API.Services;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Options;
 using DiaErpIntegration.API.Options;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -90,6 +91,19 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 app.UseCors("AllowAll");
+
+// DiaSettings: JSON section name is "DiaSettings" (not "DiaOptions"). Env override: DiaSettings__TransferRequireSnapshot
+try
+{
+    var diaStartup = app.Services.GetRequiredService<IOptions<DiaOptions>>().Value;
+    app.Logger.LogWarning(
+        "DiaSettings runtime: TransferRequireSnapshot={TransferRequireSnapshot} | override env: DiaSettings__TransferRequireSnapshot (not DiaOptions__…)",
+        diaStartup.TransferRequireSnapshot);
+}
+catch
+{
+    // ignore
+}
 
 // DIAG startup stamp (stale backend detection)
 try

@@ -19,6 +19,11 @@ _build_out/
 _build_out2/
 _build_rc/
 
+# Backend temporary build/run folders
+Backend/_build_*/
+Backend/_run_out/
+Backend/_verify_build_out/
+
 # OS
 Thumbs.db
 Desktop.ini
